@@ -1,57 +1,76 @@
-import { useEffect, useState } from "react";
+import { useEffect, useState, useCallback, useRef } from "react";
 import { io } from "socket.io-client";
 import axios from "axios";
+import CrashGraph from "./components/CrashGraph";
 import "./App.css";
 
 const SOCKET_URL = import.meta.env.VITE_SOCKET_URL || "http://localhost:3000";
 const API_URL = import.meta.env.VITE_API_URL || "http://localhost:3000/api";
 
-// Color profit/loss for dashboard
-function plColor(num) {
-  if (num > 0) return "#23b26d";
-  if (num < 0) return "#e04b4b";
-  return "#222";
-}
+// Quick bet amounts
+const QUICK_BETS = [10, 25, 50, 100];
 
 function App() {
-  // --- Auth/User
+  // Auth State
   const [inputUsername, setInputUsername] = useState("");
   const [username, setUsername] = useState("");
   const [authenticated, setAuthenticated] = useState(false);
 
-  // --- Socket Connection State (✅ ADDED)
+  // Socket State
+  const [socket, setSocket] = useState(null);
   const [socketId, setSocketId] = useState("");
-  const [connectionStatus, setConnectionStatus] = useState("Disconnected");
+  const [isConnected, setIsConnected] = useState(false);
 
-  // --- Game State
+  // Game State
   const [currentMultiplier, setCurrentMultiplier] = useState(1.0);
   const [gamePhase, setGamePhase] = useState("waiting");
+  const [crashPoint, setCrashPoint] = useState(null);
 
-  // --- Betting & UI
+  // Betting State
   const [betAmount, setBetAmount] = useState("");
   const [betCurrency, setBetCurrency] = useState("BTC");
-  const [status, setStatus] = useState("");
-  const [betActive, setBetActive] = useState(false);
-  const [betInfo, setBetInfo] = useState(null);
-  const [lastPL, setLastPL] = useState(null);
+  const [hasBet, setHasBet] = useState(false);
+  const [betPlaced, setBetPlaced] = useState(null);
+  const [canCashout, setCanCashout] = useState(false);
 
-  // --- Data
-  const [wallet, setWallet] = useState({
-    BTC: "0.0000000000",
-    ETH: "0.0000000000",
-  });
+  // UI State
+  const [status, setStatus] = useState("Welcome! Login to start playing.");
+  const [notification, setNotification] = useState(null);
+  const [wallet, setWallet] = useState({ BTC: "0.0000000000", ETH: "0.0000000000" });
   const [gameHistory, setGameHistory] = useState([]);
   const [txHistory, setTxHistory] = useState([]);
-  const [socket, setSocket] = useState(null);
-  const [showTxHistory, setShowTxHistory] = useState(false);
   const [showGameHistory, setShowGameHistory] = useState(false);
+  const [showTxHistory, setShowTxHistory] = useState(false);
+  const [countdown, setCountdown] = useState(null);
+  const [isPlacingBet, setIsPlacingBet] = useState(false);
+  const [activePlayers, setActivePlayers] = useState(0);
+  const [showWalletDropdown, setShowWalletDropdown] = useState(false);
 
-  // Timer for next round
-  const [nextRoundTime, setNextRoundTime] = useState(null);
-  const [secondsToNextRound, setSecondsToNextRound] = useState(null);
+  // Stats
+  const [stats, setStats] = useState({
+    totalWins: 0,
+    totalLosses: 0,
+    biggestWin: 0,
+    totalProfit: 0
+  });
 
-  // --- Fetch wallet for new user or update
-  const fetchWallet = async (user) => {
+  // Refs
+  const betPlacedRef = useRef(betPlaced);
+  const usernameRef = useRef(username);
+  const canCashoutRef = useRef(canCashout);
+
+  useEffect(() => {
+    betPlacedRef.current = betPlaced;
+    usernameRef.current = username;
+    canCashoutRef.current = canCashout;
+  }, [betPlaced, username, canCashout]);
+
+  const showNotification = useCallback((type, message, duration = 3000) => {
+    setNotification({ type, message });
+    setTimeout(() => setNotification(null), duration);
+  }, []);
+
+  const fetchWallet = useCallback(async (user) => {
     try {
       const res = await axios.get(`${API_URL}/player/wallet/${user}`);
       const btc = res.data.wallets?.find((w) => w.currency === "BTC");
@@ -60,568 +79,646 @@ function App() {
         BTC: btc ? Number(btc.balance).toFixed(10) : "0.0000000000",
         ETH: eth ? Number(eth.balance).toFixed(10) : "0.0000000000",
       });
-    } catch {
-      setWallet({
-        BTC: "0.0000000000",
-        ETH: "0.0000000000",
-      });
+    } catch (error) {
+      console.error("Failed to fetch wallet:", error);
     }
-  };
+  }, []);
 
-  // --- Socket + events with connection status tracking (✅ UPDATED)
+  // Socket connection
   useEffect(() => {
     if (!authenticated) return;
 
-    const s = io(SOCKET_URL);
-    setSocket(s);
-
-    // ✅ Enhanced connection handler with socket ID
-    s.on("connect", () => {
-      setConnectionStatus("Connected");
-      setSocketId(s.id);
-      setStatus(`✅ Connected to server! Socket ID: ${s.id}`);
-      setGamePhase("waiting");
-
-      // Set a default 5s timer until first round
-      const now = Date.now();
-      setNextRoundTime(now + 5000);
-      setSecondsToNextRound(5);
+    console.log("🔌 Connecting to socket:", SOCKET_URL);
+    
+    const s = io(SOCKET_URL, {
+      reconnection: true,
+      reconnectionDelay: 1000,
+      reconnectionAttempts: 10,
+      transports: ['websocket', 'polling'],
+      forceNew: false
     });
 
-    // ✅ Enhanced disconnect handler
+    s.on("connect", () => {
+      console.log("✅ Socket connected:", s.id);
+      setIsConnected(true);
+      setSocketId(s.id);
+      setStatus("🎮 Connected! Waiting for next round...");
+      showNotification("success", "Connected to game server!");
+    });
+
+    s.on("connect_error", (error) => {
+      console.error("❌ Socket connection error:", error);
+      setIsConnected(false);
+    });
+
+    s.on("reconnect", () => {
+      console.log("✅ Reconnected to server");
+      showNotification("success", "Reconnected to server!");
+    });
+
     s.on("disconnect", () => {
-      setConnectionStatus("Disconnected");
+      setIsConnected(false);
       setSocketId("");
       setStatus("❌ Disconnected from server");
-      setGamePhase("waiting");
+      showNotification("error", "Lost connection to server");
+    });
+
+    s.on("player_bet", (payload) => {
+      console.log("🎲 Player placed bet:", payload);
+      if (payload.username !== usernameRef.current) {
+        setActivePlayers(prev => prev + 1);
+      }
     });
 
     s.on("round_start", (data) => {
-      setStatus("Round started! Place your bet.");
-      setLastPL(null);
-      setNextRoundTime(null);
-      setSecondsToNextRound(null);
-      setCurrentMultiplier(1.0);
+      console.log("🎮 Round started:", data);
       setGamePhase("betting");
+      setCurrentMultiplier(1.0);
+      setCrashPoint(null);
+      setCountdown(null);
+      setStatus("🎲 Round started! Place your bets!");
+      setHasBet(false);
+      setCanCashout(false);
+      setActivePlayers(0);
+      showNotification("info", "New round started! Place your bet now!");
     });
 
     s.on("multiplier_update", (data) => {
       setCurrentMultiplier(data.multiplier);
       setGamePhase("flying");
-      if (betActive) {
-        setStatus(`Flying at ${data.multiplier}x - Cash out anytime!`);
-      } else {
-        setStatus(`Round is flying at ${data.multiplier}x`);
+      
+      if (betPlacedRef.current && !canCashoutRef.current) {
+        setCanCashout(true);
       }
     });
 
     s.on("round_crash", async (data) => {
-      if (data.multiplier) {
-        setCurrentMultiplier(data.multiplier);
-      }
+      console.log("💥 Round crashed:", data);
+      const finalMultiplier = data.multiplier || currentMultiplier;
+      setCurrentMultiplier(finalMultiplier);
+      setCrashPoint(finalMultiplier);
       setGamePhase("crashed");
-
-      let crashMultiplier = "unknown";
-      try {
-        const { data: historyData } = await axios.get(
-          `${API_URL}/game/history`
-        );
-        if (Array.isArray(historyData) && historyData.length > 0) {
-          const lastRound =
-            historyData[0].is_active && historyData.length > 1
-              ? historyData[1]
-              : historyData[0];
-          crashMultiplier =
-            lastRound && lastRound.crash_point !== undefined
-              ? `${lastRound.crash_point}x`
-              : "unknown";
-        }
-      } catch {
-        crashMultiplier = "unknown";
+      setCanCashout(false);
+      
+      const currentBet = betPlacedRef.current;
+      if (currentBet) {
+        const lostAmount = currentBet.amount;
+        showNotification("error", `💔 Crashed at ${finalMultiplier.toFixed(2)}x! Lost $${lostAmount}`);
+        setBetPlaced(null);
+        setHasBet(false);
+        
+        setStats(prev => ({
+          ...prev,
+          totalLosses: prev.totalLosses + 1,
+          totalProfit: prev.totalProfit - lostAmount
+        }));
+        
+        setTimeout(() => fetchWallet(usernameRef.current), 500);
       }
+      
+      setStatus(`💥 Crashed at ${finalMultiplier.toFixed(2)}x`);
+      setCountdown(5);
+    });
 
-      setStatus(`Round crashed at ${crashMultiplier}`);
-
-      const now = Date.now();
-      setNextRoundTime(now + 5000);
-      setSecondsToNextRound(5);
-
-      if (betInfo) {
-        setLastPL({
-          value: -betInfo.amount,
-          label: "Crashed! Lost bet.",
+    s.on("bet_placed", (payload) => {
+      console.log("✅ Bet placed successfully:", payload);
+      
+      if (payload.username === usernameRef.current) {
+        setBetPlaced({
+          amount: payload.usd_amount,
+          currency: payload.currency,
+          timestamp: Date.now()
         });
-        setBetActive(false);
-        setBetInfo(null);
+        setHasBet(true);
+        setBetAmount("");
+        setIsPlacingBet(false);
+        showNotification("success", `✅ Bet placed: $${payload.usd_amount} in ${payload.currency}`);
+        
+        fetchWallet(usernameRef.current);
       }
-      fetchWallet(username);
+    });
+
+    s.on("bet_error", (payload) => {
+      console.error("❌ Bet error:", payload);
+      setIsPlacingBet(false);
+      showNotification("error", payload.msg || "Failed to place bet");
     });
 
     s.on("player_cashout", (payload) => {
-      let profit = null;
-      if (betInfo && typeof payload.usd_equivalent === "number") {
-        profit = payload.usd_equivalent - Number(betInfo.amount);
+      console.log("💰 Player cashed out:", payload);
+      
+      const currentBet = betPlacedRef.current;
+      if (payload.username === usernameRef.current && currentBet) {
+        const profit = payload.usd_equivalent - currentBet.amount;
+        showNotification(
+          "success", 
+          `🎉 Cashed out at ${payload.multiplier.toFixed(2)}x! Won $${payload.usd_equivalent.toFixed(2)}`
+        );
+        
+        setBetPlaced(null);
+        setHasBet(false);
+        setCanCashout(false);
+        
+        setStats(prev => ({
+          ...prev,
+          totalWins: prev.totalWins + 1,
+          biggestWin: Math.max(prev.biggestWin, profit),
+          totalProfit: prev.totalProfit + profit
+        }));
+        
+        setTimeout(() => fetchWallet(usernameRef.current), 500);
       }
-
-      setLastPL({
-        value: profit ?? 0,
-        label: profit > 0 ? "Profit" : profit < 0 ? "Loss" : "Break-even",
-      });
-
-      setStatus(
-        `Cashed out: ${payload.payoutCrypto ?? ""} ${
-          payload.currency ?? ""
-        } ($${payload.usd_equivalent ?? "?"})`
-      );
-      setBetActive(false);
-      setBetInfo(null);
-      fetchWallet(username);
     });
 
-    s.on("error", (err) => setStatus("Error: " + err.msg));
+    s.on("error", (err) => {
+      console.error("Socket error:", err);
+      showNotification("error", err.msg || "An error occurred");
+    });
 
-    // ✅ Enhanced cleanup
+    setSocket(s);
+
     return () => {
+      console.log("🔌 Disconnecting socket");
       s.disconnect();
       setSocket(null);
-      setSocketId("");
-      setConnectionStatus("Disconnected");
     };
-  }, [authenticated, betInfo, username, betActive]);
+  }, [authenticated, showNotification, fetchWallet]);
 
-  // --- Countdown effect
+  // Countdown timer
   useEffect(() => {
-    let timer;
-    if (nextRoundTime) {
-      timer = setInterval(() => {
-        const left = Math.max(
-          0,
-          Math.ceil((nextRoundTime - Date.now()) / 1000)
-        );
-        setSecondsToNextRound(left);
-        if (left <= 0) {
-          setNextRoundTime(null);
-          setSecondsToNextRound(null);
-        }
-      }, 250);
-    }
-    return () => clearInterval(timer);
-  }, [nextRoundTime]);
+    if (countdown === null || countdown <= 0) return;
 
-  // --- REST API actions
-  const fetchGameHist = async () => {
-    try {
-      const { data } = await axios.get(`${API_URL}/game/history`);
-      setGameHistory(Array.isArray(data) ? data : []);
-    } catch {
-      setGameHistory([]);
-    }
-  };
-
-  const fetchTxHist = async () => {
-    try {
-      const { data } = await axios.get(
-        `${API_URL}/player/transactions/${username}`
-      );
-      setTxHistory(Array.isArray(data) ? data : []);
-    } catch {
-      setTxHistory([]);
-    }
-  };
-
-  const registerUser = async (e) => {
-    e.preventDefault();
-    if (!inputUsername) return setStatus("Enter username to register.");
-
-    try {
-      await axios.post(`${API_URL}/player/create`, {
-        username: inputUsername,
+    const timer = setInterval(() => {
+      setCountdown(prev => {
+        if (prev <= 1) return null;
+        return prev - 1;
       });
+    }, 1000);
+
+    return () => clearInterval(timer);
+  }, [countdown]);
+
+  const handleRegister = async (e) => {
+    e.preventDefault();
+    if (!inputUsername.trim()) {
+      showNotification("error", "Please enter a username");
+      return;
+    }
+
+    try {
+      await axios.post(`${API_URL}/player/create`, { username: inputUsername });
       setUsername(inputUsername);
       setAuthenticated(true);
-      setStatus("Registered as " + inputUsername);
+      showNotification("success", `Welcome ${inputUsername}!`);
       fetchWallet(inputUsername);
-      setShowGameHistory(false);
-      setShowTxHistory(false);
     } catch (err) {
-      setStatus(
-        "Registration error: " + (err.response?.data?.msg || err.message)
-      );
+      showNotification("error", err.response?.data?.msg || "Registration failed");
     }
   };
 
-  const loginUser = async (e) => {
+  const handleLogin = async (e) => {
     e.preventDefault();
-    if (!inputUsername)
-      return setStatus("Enter your registered username to login.");
+    if (!inputUsername.trim()) {
+      showNotification("error", "Please enter your username");
+      return;
+    }
 
     setUsername(inputUsername);
     setAuthenticated(true);
-    setStatus("Logged in as " + inputUsername);
+    showNotification("success", `Welcome back ${inputUsername}!`);
     fetchWallet(inputUsername);
-    setShowGameHistory(false);
-    setShowTxHistory(false);
   };
 
-  const placeBet = async (e) => {
-    e.preventDefault();
-    setStatus("Placing bet...");
-
-    if (!betAmount || isNaN(betAmount) || betAmount <= 0)
-      return setStatus("Enter valid USD amount.");
-
-    try {
-      await axios.post(`${API_URL}/game/bet`, {
-        username,
-        usd_amount: Number(betAmount),
-        currency: betCurrency,
-      });
-
-      setStatus(`Bet placed: $${betAmount} in ${betCurrency}`);
-      setBetActive(true);
-      setBetInfo({
-        amount: Number(betAmount),
-        currency: betCurrency,
-        time: Date.now(),
-      });
-      setLastPL(null);
-      fetchWallet(username);
-      setShowGameHistory(false);
-      setShowTxHistory(false);
-    } catch (err) {
-      setStatus("Bet error: " + (err.response?.data?.msg || err.message));
-      setBetActive(false);
+  const handlePlaceBet = (amount) => {
+    if (!socket || !isConnected) {
+      showNotification("error", "Not connected to server");
+      return;
     }
+
+    if (hasBet) {
+      showNotification("error", "You already have a bet in this round");
+      return;
+    }
+
+    const betValue = amount || parseFloat(betAmount);
+    if (!betValue || betValue <= 0) {
+      showNotification("error", "Enter a valid bet amount");
+      return;
+    }
+
+    setIsPlacingBet(true);
+
+    socket.emit("place_bet", {
+      username,
+      usd_amount: betValue,
+      currency: betCurrency,
+    });
   };
 
-  const cashout = (e) => {
-    e.preventDefault();
-    if (!betActive) return setStatus("No active bet to cash out.");
+  const handleCashout = () => {
+    if (!canCashout || !betPlaced) {
+      showNotification("error", "Cannot cash out right now");
+      return;
+    }
 
     if (socket) {
       socket.emit("cashout", { username });
-      setStatus("Cashout requested...");
+      setStatus("⏳ Cashing out...");
     }
   };
 
-  const logout = () => {
+  const handleLogout = () => {
     if (socket) socket.disconnect();
-    setInputUsername("");
-    setUsername("");
     setAuthenticated(false);
+    setUsername("");
+    setInputUsername("");
     setBetAmount("");
-    setBetCurrency("BTC");
-    setWallet({
-      BTC: "0.0000000000",
-      ETH: "0.0000000000",
-    });
-    setStatus("Logged out.");
-    setLastPL(null);
-    setBetInfo(null);
-    setBetActive(false);
+    setBetPlaced(null);
+    setHasBet(false);
+    setWallet({ BTC: "0.0000000000", ETH: "0.0000000000" });
     setGameHistory([]);
     setTxHistory([]);
-    setShowGameHistory(false);
-    setShowTxHistory(false);
-    setNextRoundTime(null);
-    setSecondsToNextRound(null);
-    setCurrentMultiplier(1.0);
-    setGamePhase("waiting");
-    setSocketId("");
-    setConnectionStatus("Disconnected");
+    setStats({ totalWins: 0, totalLosses: 0, biggestWin: 0, totalProfit: 0 });
+    showNotification("info", "Logged out successfully");
   };
 
-  // ✅ Socket Connection Status Display Component
-  function ConnectionStatus() {
-    return (
-      <div
-        className="connection-status"
-        style={{
-          padding: "10px",
-          margin: "10px 0",
-          border: "1px solid #ddd",
-          borderRadius: "5px",
-          backgroundColor:
-            connectionStatus === "Connected" ? "#d4edda" : "#f8d7da",
-        }}
-      >
-        <div style={{ fontWeight: "bold" }}>
-          🔌 Socket Status:
-          <span
-            style={{
-              marginLeft: "10px",
-              color: connectionStatus === "Connected" ? "#155724" : "#721c24",
-            }}
-          >
-            {connectionStatus}
-          </span>
-        </div>
-        {socketId && (
-          <div style={{ fontSize: "14px", marginTop: "5px", color: "#666" }}>
-            Socket ID: <code>{socketId}</code>
-          </div>
-        )}
-      </div>
-    );
-  }
+  const fetchGameHistory = async () => {
+    try {
+      const { data } = await axios.get(`${API_URL}/game/history`);
+      setGameHistory(Array.isArray(data) ? data : []);
+    } catch (error) {
+      console.error("Failed to fetch game history:", error);
+    }
+  };
 
-  // Conditional Multiplier Display - Only show when bet is active
-  function MultiplierDisplay() {
-    if (!betActive) return null;
+  const fetchTxHistory = async () => {
+    try {
+      const { data } = await axios.get(`${API_URL}/player/transactions/${username}`);
+      setTxHistory(Array.isArray(data) ? data : []);
+    } catch (error) {
+      console.error("Failed to fetch transactions:", error);
+    }
+  };
 
-    return (
-      <div className="multiplier-display">
-        <h2>Live Multiplier</h2>
-        <div
-          className="multiplier-value"
-          style={{
-            fontSize: "48px",
-            fontWeight: "bold",
-            color:
-              gamePhase === "flying"
-                ? "#00ff88"
-                : gamePhase === "crashed"
-                ? "#ff4757"
-                : "#ffa500",
-          }}
-        >
-          {currentMultiplier.toFixed(2)}x
-        </div>
-        <div className="game-phase">
-          Status: <strong>{gamePhase.toUpperCase()}</strong>
-        </div>
-        {betInfo && (
-          <div
-            className="potential-win"
-            style={{ marginTop: "10px", fontSize: "18px" }}
-          >
-            Potential Win:{" "}
-            <strong>${(betInfo.amount * currentMultiplier).toFixed(2)}</strong>
-          </div>
-        )}
-      </div>
-    );
-  }
-
-  function WalletView() {
-    return (
-      <div>
-        <h3>💰 Wallet</h3>
-        <p>BTC: {wallet.BTC}</p>
-        <p>ETH: {wallet.ETH}</p>
-      </div>
-    );
-  }
-
-  function GameHistoryView() {
-    if (!showGameHistory) return null;
-
-    return (
-      <div className="history-section">
-        <h3>🎮 Game History</h3>
-        {gameHistory.length === 0 ? (
-          <p>No game history available</p>
-        ) : (
-          <div className="history-list">
-            {gameHistory.slice(0, 10).map((round, index) => (
-              <div key={round._id || index} className="history-item">
-                <div>
-                  <strong>
-                    Round #{round.round_id?.slice(-6) || "Unknown"}
-                  </strong>
-                </div>
-                <div>
-                  Crashed at:{" "}
-                  <span style={{ color: "#ff4757", fontWeight: "bold" }}>
-                    {round.crash_point ? `${round.crash_point}x` : "N/A"}
-                  </span>
-                </div>
-                <div>Players: {round.bets?.length || 0}</div>
-                <div>
-                  {round.createdAt
-                    ? new Date(round.createdAt).toLocaleTimeString()
-                    : "Unknown time"}
-                </div>
-              </div>
-            ))}
-          </div>
-        )}
-      </div>
-    );
-  }
-
-  function TransactionHistoryView() {
-    if (!showTxHistory) return null;
-
-    return (
-      <div className="history-section">
-        <h3>📋 My Transactions</h3>
-        {txHistory.length === 0 ? (
-          <p>No transactions yet</p>
-        ) : (
-          <div className="history-list">
-            {txHistory.slice(0, 10).map((tx, index) => (
-              <div key={tx._id || index} className="history-item">
-                <div>
-                  <strong
-                    style={{
-                      color:
-                        tx.transaction_type === "bet" ? "#e04b4b" : "#23b26d",
-                    }}
-                  >
-                    {tx.transaction_type === "bet" ? "📤 BET" : "📥 CASHOUT"}
-                  </strong>
-                </div>
-                <div>Amount: ${Number(tx.usd_amount || 0).toFixed(2)}</div>
-                <div>Currency: {tx.currency || "N/A"}</div>
-                <div>Crypto: {Number(tx.crypto_amount || 0).toFixed(8)}</div>
-                <div>
-                  {tx.createdAt
-                    ? new Date(tx.createdAt).toLocaleString()
-                    : "Unknown time"}
-                </div>
-              </div>
-            ))}
-          </div>
-        )}
-      </div>
-    );
-  }
-
+  // ===== AUTH SCREEN =====
   if (!authenticated) {
     return (
-      <div className="app">
-        <h1>🎮 Crash Game</h1>
-        <form onSubmit={registerUser}>
-          <input
-            type="text"
-            placeholder="Username"
-            value={inputUsername}
-            onChange={(e) => setInputUsername(e.target.value)}
-          />
-          <button type="submit">Register</button>
-        </form>
-        <form onSubmit={loginUser}>
-          <input
-            type="text"
-            placeholder="Username"
-            value={inputUsername}
-            onChange={(e) => setInputUsername(e.target.value)}
-          />
-          <button type="submit">Login</button>
-        </form>
-        <p>Status: {status}</p>
+      <div className="auth-container">
+        <div className="auth-card">
+          <div className="auth-logo">
+            <div className="logo-icon">🎮</div>
+            <h1>Crypto Crash</h1>
+          </div>
+          <p className="auth-subtitle">
+            Real-time multiplayer crash game with provably fair gameplay
+          </p>
+          
+          <form className="auth-form" onSubmit={handleLogin}>
+            <input
+              type="text"
+              placeholder="Enter username"
+              value={inputUsername}
+              onChange={(e) => setInputUsername(e.target.value)}
+              autoFocus
+            />
+            <button type="submit" className="btn-primary">
+              🔑 Login
+            </button>
+          </form>
+
+          <div className="auth-divider">OR</div>
+
+          <form className="auth-form" onSubmit={handleRegister}>
+            <button type="submit" className="btn-secondary">
+              🚀 Create Account
+            </button>
+          </form>
+
+          <div className="auth-footer">
+            <p>Test users: test, vikas, elon, satoshi, demo</p>
+          </div>
+        </div>
       </div>
     );
   }
 
+  // ===== MAIN GAME SCREEN =====
   return (
     <div className="app">
-      <div className="header">
-        <h1>🎮 Crash Game</h1>
-        <div>
-          <span>Welcome, {username}!</span>
-          <button onClick={logout}>Logout</button>
-        </div>
-      </div>
-
-      {/* ✅ Socket Connection Status Display */}
-      <ConnectionStatus />
-
-      {/* Multiplier Display - Only shows when bet is active */}
-      <MultiplierDisplay />
-
-      <div className="status">Status: {status}</div>
-
-      {secondsToNextRound > 0 && (
-        <div className="countdown">Next round in: {secondsToNextRound}s</div>
-      )}
-
-      {lastPL && (
-        <div style={{ color: plColor(lastPL.value) }}>
-          {lastPL.label}:{" "}
-          {lastPL.value ? `$${Math.abs(lastPL.value).toFixed(2)}` : ""}
+      {notification && (
+        <div className={`notification notification-${notification.type}`}>
+          {notification.message}
         </div>
       )}
 
-      <div className="main-content">
-        <div className="left-panel">
-          <WalletView />
+      {/* Top Bar */}
+      <header className="top-bar">
+        <div className="logo-section">
+          <span className="logo-icon">🎮</span>
+          <span className="logo-text">Crypto Crash</span>
+        </div>
 
-          <div className="betting-section">
-            <h3>🎯 Place Bet</h3>
-            <form onSubmit={placeBet}>
-              <input
-                type="number"
-                placeholder="USD Amount"
-                value={betAmount}
-                onChange={(e) => setBetAmount(e.target.value)}
-                disabled={betActive}
-              />
-              <select
-                value={betCurrency}
-                onChange={(e) => setBetCurrency(e.target.value)}
-                disabled={betActive}
-              >
-                <option value="BTC">BTC</option>
-                <option value="ETH">ETH</option>
-              </select>
-              <button type="submit" disabled={betActive}>
-                {betActive ? "Bet Active" : "Place Bet"}
-              </button>
-            </form>
+        <div className="top-bar-center">
+          <div className={`status-badge ${isConnected ? 'connected' : 'disconnected'}`}>
+            <span className="status-dot"></span>
+            {isConnected ? 'Live' : 'Offline'}
+          </div>
+        </div>
 
-            {betActive && betInfo && (
-              <div className="active-bet">
-                <p>
-                  Active Bet: ${betInfo.amount} in {betInfo.currency}
-                </p>
+        <div className="top-bar-right">
+          <div className="wallet-dropdown">
+            <button 
+              className="wallet-trigger"
+              onClick={() => setShowWalletDropdown(!showWalletDropdown)}
+            >
+              <span className="wallet-icon">💰</span>
+              <span className="wallet-preview">
+                {wallet[betCurrency]} {betCurrency}
+              </span>
+              <span className="dropdown-arrow">▼</span>
+            </button>
+            
+            {showWalletDropdown && (
+              <div className="wallet-dropdown-menu">
+                <div className="wallet-item-dropdown">
+                  <span className="currency-icon">₿</span>
+                  <div>
+                    <div className="currency-name">Bitcoin</div>
+                    <div className="currency-balance">{wallet.BTC}</div>
+                  </div>
+                </div>
+                <div className="wallet-item-dropdown">
+                  <span className="currency-icon">Ξ</span>
+                  <div>
+                    <div className="currency-name">Ethereum</div>
+                    <div className="currency-balance">{wallet.ETH}</div>
+                  </div>
+                </div>
+                <div className="wallet-divider"></div>
+                <div className="stats-mini">
+                  <div>Wins: {stats.totalWins}</div>
+                  <div>Losses: {stats.totalLosses}</div>
+                  <div className={stats.totalProfit >= 0 ? 'profit' : 'loss'}>
+                    P/L: ${stats.totalProfit.toFixed(2)}
+                  </div>
+                </div>
+              </div>
+            )}
+          </div>
+
+          <div className="user-menu">
+            <div className="user-avatar">{username.charAt(0).toUpperCase()}</div>
+            <span className="username-text">{username}</span>
+            <button onClick={handleLogout} className="btn-logout-mini">
+              🚪
+            </button>
+          </div>
+        </div>
+      </header>
+
+      {/* Main Game Area */}
+      <main className="game-screen">
+        {/* Multiplier Display - Full Screen with Graph */}
+        <div className={`game-canvas phase-${gamePhase}`}>
+          <CrashGraph 
+            multiplier={currentMultiplier}
+            gamePhase={gamePhase}
+            countdown={countdown}
+            betPlaced={betPlaced}
+          />
+
+          {/* Game Status Overlay */}
+          <div className="game-status-overlay">
+            <div className="game-status-label">
+              {gamePhase === "waiting" && "⏳ Waiting..."}
+              {gamePhase === "betting" && "🎲 Betting Phase"}
+              {gamePhase === "flying" && "🚀 Flying!"}
+              {gamePhase === "crashed" && "💥 Crashed!"}
+            </div>
+
+            {activePlayers > 0 && gamePhase !== 'crashed' && (
+              <div className="active-players-overlay">
+                👥 {activePlayers} player{activePlayers !== 1 ? 's' : ''} in game
+              </div>
+            )}
+          </div>
+
+          {/* Betting Controls Overlay */}
+          <div className="betting-overlay">
+            {!hasBet ? (
+              <div className="bet-controls">
+                <div className="bet-input-section">
+                  <div className="currency-selector">
+                    <button
+                      className={`currency-btn ${betCurrency === 'BTC' ? 'active' : ''}`}
+                      onClick={() => setBetCurrency('BTC')}
+                    >
+                      ₿ BTC
+                    </button>
+                    <button
+                      className={`currency-btn ${betCurrency === 'ETH' ? 'active' : ''}`}
+                      onClick={() => setBetCurrency('ETH')}
+                    >
+                      Ξ ETH
+                    </button>
+                  </div>
+
+                  <div className="quick-bet-buttons">
+                    {QUICK_BETS.map(amount => (
+                      <button
+                        key={amount}
+                        className="quick-bet-btn"
+                        onClick={() => handlePlaceBet(amount)}
+                        disabled={!isConnected || isPlacingBet}
+                      >
+                        <span>${amount}</span>
+                      </button>
+                    ))}
+                  </div>
+
+                  <div className="custom-bet-input">
+                    <input
+                      type="number"
+                      placeholder="Custom amount"
+                      value={betAmount}
+                      onChange={(e) => setBetAmount(e.target.value)}
+                      disabled={!isConnected || isPlacingBet}
+                      onKeyPress={(e) => {
+                        if (e.key === 'Enter') {
+                          handlePlaceBet();
+                        }
+                      }}
+                    />
+                    <button
+                      className="btn-place-bet"
+                      onClick={() => handlePlaceBet()}
+                      disabled={!isConnected || isPlacingBet || !betAmount}
+                    >
+                      {isPlacingBet ? "⏳" : "🚀"} Place Bet
+                    </button>
+                  </div>
+                </div>
+              </div>
+            ) : (
+              <div className="cashout-controls">
+                <div className="active-bet-info">
+                  <div className="bet-label">Your Bet</div>
+                  <div className="bet-value">${betPlaced.amount} {betPlaced.currency}</div>
+                </div>
                 <button
-                  onClick={cashout}
-                  disabled={gamePhase !== "flying"}
-                  style={{
-                    backgroundColor:
-                      gamePhase === "flying" ? "#28a745" : "#6c757d",
-                    color: "white",
-                    padding: "10px 20px",
-                    border: "none",
-                    borderRadius: "5px",
-                    cursor: gamePhase === "flying" ? "pointer" : "not-allowed",
-                  }}
+                  className="btn-cashout-main"
+                  onClick={handleCashout}
+                  disabled={!canCashout}
                 >
-                  💰 Cash Out at {currentMultiplier.toFixed(2)}x
+                  {canCashout 
+                    ? `💰 CASH OUT ${currentMultiplier.toFixed(2)}x`
+                    : "⏳ Waiting for flight..."}
                 </button>
               </div>
             )}
           </div>
         </div>
 
-        <div className="right-panel">
-          <div className="history-buttons">
-            <button
-              onClick={() => {
-                setShowGameHistory(!showGameHistory);
-                setShowTxHistory(false);
-                if (!showGameHistory) fetchGameHist();
-              }}
-            >
-              {showGameHistory ? "Hide" : "Show"} Game History
-            </button>
-            <button
-              onClick={() => {
-                setShowTxHistory(!showTxHistory);
-                setShowGameHistory(false);
-                if (!showTxHistory) fetchTxHist();
-              }}
-            >
-              {showTxHistory ? "Hide" : "Show"} My Transactions
-            </button>
-          </div>
-
-          <GameHistoryView />
-          <TransactionHistoryView />
+        {/* Bottom History Bar */}
+        <div className="history-bar">
+          <button
+            className={`history-tab ${showGameHistory ? 'active' : ''}`}
+            onClick={() => {
+              setShowGameHistory(!showGameHistory);
+              setShowTxHistory(false);
+              if (!showGameHistory) fetchGameHistory();
+            }}
+          >
+            🎮 Game History
+          </button>
+          <button
+            className={`history-tab ${showTxHistory ? 'active' : ''}`}
+            onClick={() => {
+              setShowTxHistory(!showTxHistory);
+              setShowGameHistory(false);
+              if (!showTxHistory) fetchTxHistory();
+            }}
+          >
+            📋 My Bets
+          </button>
         </div>
-      </div>
+
+        {(showGameHistory || showTxHistory) && (
+          <div className="history-panel">
+            {showGameHistory && (
+              <div className="history-content-detailed">
+                {gameHistory.length === 0 ? (
+                  <p className="empty-msg">No history yet</p>
+                ) : (
+                  <div className="history-table">
+                    <div className="history-table-header">
+                      <div>Round ID</div>
+                      <div>Crash Point</div>
+                      <div>Players</div>
+                      <div>Duration</div>
+                      <div>Time</div>
+                    </div>
+                    {gameHistory.slice(0, 10).map((round, idx) => {
+                      const duration = round.duration_ms 
+                        ? (round.duration_ms / 1000).toFixed(1) + 's'
+                        : 'N/A';
+                      const crashColor = round.crash_point >= 2 
+                        ? 'var(--accent-primary)' 
+                        : round.crash_point >= 1.5 
+                        ? 'var(--accent-warning)' 
+                        : 'var(--accent-danger)';
+                      
+                      return (
+                        <div key={round._id || idx} className="history-table-row">
+                          <div className="round-id-cell">
+                            <span className="round-badge">#{round.round_id?.slice(-6) || "Unknown"}</span>
+                          </div>
+                          <div className="crash-point-cell">
+                            <span className="crash-value-large" style={{ color: crashColor }}>
+                              {round.crash_point ? `${round.crash_point.toFixed(2)}x` : "N/A"}
+                            </span>
+                          </div>
+                          <div className="players-cell">
+                            <span className="player-count">
+                              👥 {round.bets?.length || 0}
+                            </span>
+                          </div>
+                          <div className="duration-cell">
+                            <span className="duration-badge">{duration}</span>
+                          </div>
+                          <div className="time-cell">
+                            {round.createdAt
+                              ? new Date(round.createdAt).toLocaleTimeString()
+                              : "Unknown"}
+                          </div>
+                        </div>
+                      );
+                    })}
+                  </div>
+                )}
+              </div>
+            )}
+
+            {showTxHistory && (
+              <div className="history-content-detailed">
+                {txHistory.length === 0 ? (
+                  <p className="empty-msg">No bets yet</p>
+                ) : (
+                  <div className="history-table">
+                    <div className="history-table-header">
+                      <div>Type</div>
+                      <div>Amount</div>
+                      <div>Currency</div>
+                      <div>Crypto Amount</div>
+                      <div>Price</div>
+                      <div>Time</div>
+                    </div>
+                    {txHistory.slice(0, 10).map((tx, idx) => {
+                      const isBet = tx.transaction_type === 'bet';
+                      const profit = isBet ? null : tx.usd_amount;
+                      
+                      return (
+                        <div key={tx._id || idx} className="history-table-row">
+                          <div className="type-cell">
+                            <span className={`type-badge ${isBet ? 'bet-badge' : 'win-badge'}`}>
+                              {isBet ? '📤 BET' : '📥 WIN'}
+                            </span>
+                          </div>
+                          <div className="amount-cell">
+                            <span className={`amount-value ${isBet ? 'negative' : 'positive'}`}>
+                              {isBet ? '-' : '+'}${Number(tx.usd_amount || 0).toFixed(2)}
+                            </span>
+                          </div>
+                          <div className="currency-cell">
+                            <span className="currency-badge">
+                              {tx.currency === 'BTC' ? '₿' : 'Ξ'} {tx.currency || "N/A"}
+                            </span>
+                          </div>
+                          <div className="crypto-cell">
+                            <span className="crypto-amount">
+                              {Number(tx.crypto_amount || 0).toFixed(8)}
+                            </span>
+                          </div>
+                          <div className="price-cell">
+                            <span className="price-value">
+                              ${Number(tx.price_at_time || 0).toLocaleString()}
+                            </span>
+                          </div>
+                          <div className="time-cell">
+                            {tx.createdAt
+                              ? new Date(tx.createdAt).toLocaleString()
+                              : "Unknown"}
+                          </div>
+                        </div>
+                      );
+                    })}
+                  </div>
+                )}
+              </div>
+            )}
+          </div>
+        )}
+      </main>
     </div>
   );
 }

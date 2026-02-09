@@ -1,0 +1,53 @@
+<!DOCTYPE html>
+<html>
+<head>
+    <title>Socket Test</title>
+    <script src="https://cdn.socket.io/4.5.4/socket.io.min.js"></script>
+</head>
+<body>
+    <h1>Socket Connection Test</h1>
+    <div id="status">Connecting...</div>
+    <div id="events"></div>
+    
+    <script>
+        const socket = io('http://localhost:3000');
+        const statusDiv = document.getElementById('status');
+        const eventsDiv = document.getElementById('events');
+        
+        function log(message) {
+            const p = document.createElement('p');
+            p.textContent = new Date().toLocaleTimeString() + ': ' + message;
+            eventsDiv.appendChild(p);
+            console.log(message);
+        }
+        
+        socket.on('connect', () => {
+            statusDiv.textContent = 'Connected! Socket ID: ' + socket.id;
+            statusDiv.style.color = 'green';
+            log('Connected to server');
+        });
+        
+        socket.on('disconnect', () => {
+            statusDiv.textContent = 'Disconnected';
+            statusDiv.style.color = 'red';
+            log('Disconnected from server');
+        });
+        
+        socket.on('round_start', (data) => {
+            log('Round started: ' + JSON.stringify(data));
+        });
+        
+        socket.on('multiplier_update', (data) => {
+            log('Multiplier: ' + data.multiplier);
+        });
+        
+        socket.on('round_crash', (data) => {
+            log('Round crashed: ' + JSON.stringify(data));
+        });
+        
+        socket.on('error', (err) => {
+            log('Error: ' + JSON.stringify(err));
+        });
+    </script>
+</body>
+</html>
