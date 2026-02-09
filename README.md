@@ -12,35 +12,62 @@
 
 ## 🚀 Quick Start
 
+**New to the project?** See [SETUP.md](SETUP.md) for complete setup instructions.
+
 **Test the game:** Use username `elon` on the [live demo](https://crypto-crash-game947.netlify.app/)
 
 ```bash
-# Clone & Install
+# Quick setup (requires MongoDB & CoinMarketCap API key)
 git clone https://github.com/vikasmukhiya1999/crypto-crash-game.git
-
 cd crypto-crash-game
 
-# Backend
-cd server && npm install && npm run dev
+# Configure environment (see SETUP.md for details)
+cd server && cp .env.example .env
+# Edit .env with your credentials
+npm install && node seed/seed.js && npm run dev
 
-# Frontend
-cd client && npm install && npm run dev
+# In another terminal
+cd client && cp .env.example .env
+npm install && npm run dev
 ```
+
+**📖 Documentation:**
+- [SETUP.md](SETUP.md) - Complete setup guide with troubleshooting
+- [SECURITY.md](SECURITY.md) - Security best practices
+- [QUICK_START.md](QUICK_START.md) - Quick reference guide
 
 ## ⚙️ Environment Setup
 
-### Server (.env) # server/.env
+### Server Configuration
 
+1. Copy the example environment file:
+```bash
+cd server
+cp .env.example .env
+```
+
+2. Edit `server/.env` and add your credentials:
 ```bash
 PORT=3000
 MONGO_URI=your_mongodb_connection_string
 API_KEY=your_coinmarketcap_api_key
 NODE_ENV=development
-FRONTEND_URL=your_frontend_url
+FRONTEND_URL=http://localhost:5173
 ```
 
-### Client (.env) # client/.env
+**Get your credentials:**
+- MongoDB: [mongodb.com/cloud/atlas](https://www.mongodb.com/cloud/atlas) (free tier available)
+- CoinMarketCap API: [coinmarketcap.com/api](https://coinmarketcap.com/api/) (free tier available)
 
+### Client Configuration
+
+1. Copy the example environment file:
+```bash
+cd client
+cp .env.example .env
+```
+
+2. Edit `client/.env` if needed (defaults work for local development):
 ```bash
 VITE_SOCKET_URL=http://localhost:3000
 VITE_API_URL=http://localhost:3000/api
