@@ -10,8 +10,11 @@ const __filename = fileURLToPath(import.meta.url);
 const __dirname = dirname(__filename);
 const envPath = join(__dirname, '..', '.env');
 
-// Check if .env file exists
-if (!existsSync(envPath)) {
+// Check if .env file exists (skip in production if env vars are set via platform)
+const isProduction = process.env.NODE_ENV === 'production';
+const hasEnvVars = process.env.MONGO_URI && process.env.API_KEY;
+
+if (!existsSync(envPath) && !isProduction) {
   console.error('❌ ERROR: .env file not found!');
   console.error('');
   console.error('Please create a .env file:');
@@ -22,8 +25,19 @@ if (!existsSync(envPath)) {
   process.exit(1);
 }
 
-// Load environment variables
-dotenv.config({ path: envPath });
+// Load environment variables from .env file if it exists
+if (existsSync(envPath)) {
+  dotenv.config({ path: envPath });
+} else if (isProduction && hasEnvVars) {
+  console.log('ℹ️  Running in production mode with platform environment variables');
+} else {
+  console.error('❌ ERROR: No environment configuration found!');
+  console.error('');
+  console.error('For production deployment:');
+  console.error('  Set environment variables in your hosting platform dashboard');
+  console.error('');
+  process.exit(1);
+}
 
 // Required environment variables
 const required = [

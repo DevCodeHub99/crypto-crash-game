@@ -6,7 +6,8 @@
   "scripts": {
     "test": "echo \"Error: no test specified\" && exit 1",
     "verify-env": "node scripts/verify-env.js",
-    "start": "npm run verify-env && node server.js",
+    "start": "node server.js",
+    "start:verify": "npm run verify-env && node server.js",
     "dev": "npm run verify-env && nodemon server.js"
   },
   "keywords": [],
